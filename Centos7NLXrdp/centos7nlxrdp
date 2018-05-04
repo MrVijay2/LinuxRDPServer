@@ -4,7 +4,8 @@
 #: Author      : "Kybernetes" <correodelkybernetes@gmail.com>
 #: Version     : 1.0.0
 #: Description : Executable Dash shell script
-#:             : Intalls the following packages on a CentOS7 minimal:
+#:             : Intalls/updates the following packages on a CentOS7 minimal:
+#:             : * Miscelaneous cmdline tools;
 #:             : * Gnome Destkop environment;
 #:             : * Neutrino Lab's Xrdp + Xorgxrdp.
 #: Options     : N/A
@@ -40,10 +41,17 @@ _XRDPDIR=
 _XORGXRDPDIR=
 # Firewall zone where to publish Xrdp port
 _XRDPZONE=public
+# Variable list of miscelaneous tool
+# Feel free to add as many as you want
+_MISCTOOLZ=$(cat <<'EOF' 
+net-tools nmap bind-utils traceroute vim lsof wget bc psmisc lsscsi zip unzip
+sudo rsync bash-completion bash-completion-extras tcpdump
+EOF
+)
 # Variable list of miscelaneous build tool packages
 # You may extend it as required by subsequent build attempt missing-package like
 # error mesages.
-_BLDMISCPKGS=$(cat <<EOF
+_BLDMISCPKGS=$(cat <<'EOF'
 finger cmake patch gcc make autoconf libtool automake pkgconfig gettext file 
 pam-devel libX11-devel libXfixes-devel libjpeg-devel libXrandr-devel nasm flex 
 bison gcc-c++ libxslt perl-libxml-perl xorg-x11-font-utils xmlto-tex fuse-devel
@@ -116,6 +124,15 @@ SysUpdate() { #@ DESCRIPTION: Performs a full system's packages update
     sleep 1
     if ! yumy update; then
         errmsg "Failed to update system."
+        return 1
+    fi
+    stdmsg "Done."
+}
+MscInstall() { #@ DESCRIPTION: Installs miscelaneous command line tools
+               #@ USAGE: MscInstall
+    stdmsg "Installing miscelaneous tools.."
+    if ! yumy install $_MISCTOOLZ; then
+        errmsg "Failed to install tools."
         return 1
     fi
     stdmsg "Done."
@@ -630,6 +647,8 @@ main() {
     epelon || return $?
     # Update system
     SysUpdate || return $?
+    # Install miscelaneous tools
+    MscInstall || return $?
     # Install Firewalld firewall service
     FwdInstall || return $?
     # Install Gnome Desktop w/Classic Mode startup
