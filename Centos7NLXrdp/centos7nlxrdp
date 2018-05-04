@@ -1,0 +1,666 @@
+#!/bin/sh
+#: Title       : Centos7nlxrdp
+#: Date        : 2019-05-03
+#: Author      : "Kybernetes" <correodelkybernetes@gmail.com>
+#: Version     : 1.0.0
+#: Description : Executable Dash shell script
+#:             : Intalls the following packages on a CentOS7 minimal:
+#:             : * Gnome Destkop environment;
+#:             : * Neutrino Lab's Xrdp + Xorgxrdp.
+#: Options     : N/A
+##
+## -- Externals required for execution -----------------------------------------
+type date >/dev/null || exit 1
+type cat >/dev/null || exit 1
+type sed >/dev/null || exit 1
+type cp >/dev/null || exit 1
+type sleep >/dev/null || exit 1
+type mkdir >/dev/null || exit 1
+type systemctl >/dev/null || exit 1
+type yum >/dev/null || exit 1
+##
+## -- Conf. & globals ----------------------------------------------------------
+# Default privileged user to execute this script
+_USRDFLT="root"
+# Https proxy for git client
+_PROXY="10.64.50.247:3128"
+# URL where to pull files to build Neutrinolabs Xrdp
+_XRDPURL="https://github.com/neutrinolabs/xrdp.git"
+# Latest proved-to-work Xrdp commit (clear if newest wanted/needed)
+_XRDPCMMT="0f898203519d9bdfa1fb152cf3b50795e38793fc"
+# URL where to pull files to build Neutrinolabs Xorgxrdp
+_XORGXRDPURL="https://github.com/neutrinolabs/xorgxrdp.git"
+# Latest proved-to-work Xorgxrdp commit (clear if newest wanted/needed)
+_XORGXRDPCMMT="0ea63e63010fb5ad4323c96a6050d3498bb5bd1d"
+# Git downloads container
+_DWLDIR=$HOME/Neutrinolabs
+# Xrdp local repo dir (leave it empty, automatically set)
+_XRDPDIR=
+# Xorgxrdp local repo dir (leave it empty, automatically set)
+_XORGXRDPDIR=
+# Firewall zone where to publish Xrdp port
+_XRDPZONE=public
+# Variable list of miscelaneous build tool packages
+# You may extend it as required by subsequent build attempt missing-package like
+# error mesages.
+_BLDMISCPKGS=$(cat <<EOF
+finger cmake patch gcc make autoconf libtool automake pkgconfig gettext file 
+pam-devel libX11-devel libXfixes-devel libjpeg-devel libXrandr-devel nasm flex 
+bison gcc-c++ libxslt perl-libxml-perl xorg-x11-font-utils xmlto-tex fuse-devel
+xorg-x11-server-devel libXfont-devel libXfont2-devel openssl-devel
+EOF
+)
+##
+## -- Functions ----------------------------------------------------------------
+stdmsg() { #@ DESCRIPTION: Print messages to STDOUT
+           #@ USAGE: stdmsg [ MSG ... ]
+    local time
+    if [ "${1+X}" = X ]; then
+       time=$(date +%T 2>/dev/null)
+       printf "${time:+==> [$time] }%s\n" "$1"
+       shift
+       [ "${1+X}" != X ] || printf "               %s\n" "$@"
+    fi
+}
+errmsg() { #@ DESCRIPTION: Print messages to STDERR prefixed by an error stamp
+           #@ USAGE: stderr [ MSG ... ]
+    stdmsg ${1+"Error! $@"} >&2
+}
+setvar() { #@ DESCRIPTION: Sets $1 variable specified by reference, to $2 value.
+           #@ USAGE: setvar NAME [ VALUE ]
+           #@        /!\ - WARNING! - /!\ $1 must be a valid name
+    eval "$1=\${2+\"\$2\"}" ## Without the right side backslash, escaped chars
+                            ## won't be part of assignment
+}
+cdir() { #@ DESCRIPTION: Changes current working directory
+         #@ USAGE: cdir PATH
+    stdmsg "Changing dir to $1"
+    if ! { cd "$1" && [ "$PWD" = "$1" ]; }; then
+        errmsg "Failed to change directory"
+        return 1
+    fi
+}
+yumy() { #@ DESCRIPTION: Alias for yum -y [ args .. ]
+         #@ USAGE: yumy [ YUM_ARGS .. ]
+    yum -y ${1+"$@"}
+}
+prxyset() { #@ DESCRIPTION: Sets https_proxy environment for git client
+            #@ USAGE: prxyset [ HOSTPORTSTRING ]
+    set -- ${1:-"$_PROXY"}
+    [ "X$1" = X ] || export https_proxy="$1"
+}
+chkcusr() { #@ DESCRIPTION: Tests if current user is $1
+            #@ USAGE: chkcusr [ USERNAME ]
+    set -- ${1:-"$_USRDFLT"}
+    stdmsg "Checking current user.."
+    sleep 1
+    if [ $USER != "$1" ]; then
+        errmsg "Current user is not $1."
+        return 1
+    fi
+    stdmsg "Done."
+}
+epelon() { #@ DESCRIPTION: Enables CentOS7 epel repository.
+           #@ USAGE: epelon
+    stdmsg "Enabling epel repo.."
+    sleep 1
+    if ! yumy install epel-release; then
+        errmsg "Failed to enable Epel repository."
+        return 1
+    fi
+    stdmsg "Done."
+}
+SysUpdate() { #@ DESCRIPTION: Performs a full system's packages update
+              #@ USAGE: SysUpdate
+    stdmsg "Updating system.."
+    sleep 1
+    if ! yumy update; then
+        errmsg "Failed to update system."
+        return 1
+    fi
+    stdmsg "Done."
+}
+FwdInstall() { #@ DESCRIPTION: Installs Firewalld service
+               #@ USAGE: FwdInstall
+    stdmsg "Installing Firewalld.."
+    if ! yumy install firewalld; then
+        errmsg "Failed to install Firewalld."
+        return 1
+    fi
+    if ! type firewall-cmd >/dev/null; then
+        errmsg "firewall-cmd command not available."
+        return 2
+    fi
+    if ! systemctl enable firewalld; then
+        errmsg "Failed to enable firewald service."
+        return 3
+    fi
+    stdmsg "Done."
+    stdmsg "Starting firewalld service.."
+    sleep 1
+    systemctl restart firewalld
+    sleep 5
+    if ! systemctl is-active --quiet firewalld; then
+        errmsg "Failed to start firewalld service."
+        return 4
+    fi
+    stdmsg "Done."
+}
+GNOMEInstall() { #@ DESCRIPTION: Installs GNOME destkop env. from CentOS repos.
+                 #@ USAGE: GNOMEInstall
+    stdmsg "Installing GNOME desktop environment.."
+    sleep 1
+    if ! yumy groups install "GNOME Desktop"; then
+        errmsg "Failed to install GNOME Destkop environment."
+        return 1
+    fi
+    if ! systemctl set-default graphical.target; then
+        errmsg "Failed to set default graphical target."
+        return 2
+    fi
+    stdmsg "Done."
+    stdmsg "Starting desktop environment.."
+    sleep 1
+    systemctl restart gdm
+    sleep 5
+    if ! systemctl is-active --quiet gdm; then
+        errmsg "Failed to start desktop environment."
+        return 3
+    fi
+    stdmsg "Done."
+}
+GITInstall() { #@ DESCRIPTION: Installs Git CVS from CentOS repos.
+               #@ USAGE: GITInstall
+    stdmsg "Installing Git.."
+    if ! yumy install git; then
+        errmsg "Failed to install Git."
+        return 1
+    fi
+    if ! type git >/dev/null; then
+        errmsg "Git command not available."
+        return 2
+    fi
+    stdmsg "Done."
+}
+PrecmpInstall() { #@ DESCRIPTION: Executes precompilations steps, installing
+                  #@              building tools and dependencies.
+                  #@ USAGE: PrecmpInstall
+    # Local variables ("local" must be function's first statement)
+    stdmsg "Installing compilation prereqs.."
+    if [ "X$_BLDMISCPKGS" = X ]; then
+        stdmsg "Nothing to install, skipped."
+        return 0
+    fi
+    if ! yumy install $_BLDMISCPKGS; then
+        errmsg "Failed to install prereqs."
+        return 1
+    fi
+    stdmsg "Done."
+}
+MKDwlDir() { #@ DESCRIPTION: Creates a downloads directory for local repos if
+             #@              it doesn't exists already.
+             #@ USAGE: MKDwlDir
+    _DWLDIR=${_DWLDIR:-"$HOME/Neutrinolabs"}
+    stdmsg "Creating working directories.."
+    sleep 1
+    if ! mkdir "${_DWLDIR}"; then
+        if ! [ -d  "${_DWLDIR}" ]; then
+            errmsg "Failed to create downloads dir."
+            return 1
+        fi
+    fi    
+    stdmsg "Done."
+}
+GitClone() { #@ DESCRIPTION: Clones Xrdp and Xorgxrdp repositories to local dirs
+             #@              or pulls from repos on second ans subsequent calls.
+             #@ USAGE: GitClone NAME URL COMMIT
+    set -- $1 "$2" "${2##*/}" ${3+"$3"}
+    set -- $1 "$2" "${3%.git}" ${4+"$4"}
+    if [ -d "$_DWLDIR/$3" ]; then
+        cdir "$_DWLDIR/$3" || return 1
+        stdmsg "Pulling repo.."
+        sleep 1
+        if ! git pull; then
+            stdmsg "Failed to pull from repo."
+            return 2
+        fi
+        stdmsg "Done."
+    else
+        cdir "$_DWLDIR" || return 1
+        stdmsg "Cloning $2 repo.."
+        sleep 1
+        if ! git clone --recursive "$2"; then
+            errmsg "Failed to clone repo."
+            return 3
+        fi
+    fi
+    if [ -d "$_DWLDIR/$3" ]; then
+        setvar $1 "$_DWLDIR/$3"
+    else
+        errmsg "Cloned repo dir not found."            
+        return 4
+    fi
+    stdmsg "Done."
+    if [ "X$4" != X ]; then
+        cdir "$_DWLDIR/$3" || return 1
+        stdmsg "Checking out to $4 commit.."
+        sleep 1
+        if ! git reset --hard "$4"; then
+            errmsg "Failed to checkout repo."
+            return 5
+        fi
+        stdmsg "Done."
+    fi
+}
+mkinstXorgxrdp() { #@ DESCRIPTION: Compiles and installs XorgXrdp
+                   #@ USAGE: mkinstXorgxrdp
+    cdir "$_XORGXRDPDIR" || return 1
+    stdmsg "Starting bootstrap.."
+    sleep 1
+    if ! ./bootstrap; then
+        errmsg "Failed during bootstrap."
+        return 2
+    fi
+    stdmsg "Done."
+    stdmsg "Starting configure.."
+    sleep 1
+    if ! ./configure "XRDP_CFLAGS=-I$_XORGXRDPDIR"; then
+        errmsg "Failed to configure."
+        return 3
+    fi
+    stdmsg "Done."
+    stdmsg "Compiling Xorgxrdp.."
+    sleep 1
+    if ! make; then
+        errmsg "Failed to compile."
+        return 4
+    fi
+    stdmsg "Done."
+    stdmsg "Installing Xorgxrdp.."
+    sleep 1
+    if ! make install; then
+        errmsg "Failed to install."
+        return 5
+    fi
+    stdmsg "Done."
+}
+mkinstXrdp() { #@ DESCRIPTION: Compiles and installs Xrdp
+               #@ USAGE: mkinstXrdp
+    cdir "$_XRDPDIR" || return 1
+    stdmsg "Starting bootstrap.."
+    sleep 1
+    if ! ./bootstrap; then
+        errmsg "Failed during bootstrap."
+        return 2
+    fi
+    stdmsg "Done."
+    stdmsg "Starting configure.."
+    sleep 1
+    if ! ./configure --enable-fuse --enable-jpeg; then        
+        errmsg "Failed to configure."
+        return 3
+    fi
+    stdmsg "Done."
+    stdmsg "Compiling NeutrinoLabs Xrdp.."
+    sleep 1
+    if ! make; then
+        errmsg "Failed to compile."
+        return 4
+    fi
+    stdmsg "Done."
+    stdmsg "Installing NeutrinoLabs Xrdp.."
+    sleep 1
+    if ! make install; then
+        errmsg "Failed to install."
+        return 5
+    fi
+    stdmsg "Done."
+}
+setxrdpfw() { #@ DESCRIPTION: Creates a Firewalld service file and enables that
+              #@              service in the $_XRDPZONE
+              #@ USAGE: setxrdpfw
+    stdmsg "Creating firewalld's Xrdp service file.."
+    sleep 1
+    cat >/etc/firewalld/services/xrdp.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<service version="1">
+  <short>xrdp</short>
+  <description>Acces NL Xrdp Server port 3389</description>
+  <port protocol="tcp" port="3389"/>
+</service>
+EOF
+    if [ $? -ne 0 ]; then
+        errmsg ""
+        return 1
+    fi
+    stdmsg "Done"
+    stdmsg "Adding service to firewall.."
+    if ! firewall-cmd --reload; then
+        errmsg "Failed to reload firewall."
+        return 2
+    fi    
+    if ! firewall-cmd --permanent \
+                      --zone "${_XRDPZONE:-public}" \
+                      --add-service xrdp; then
+        errmsg "Failed to add-service to firewall"
+        return 3
+    fi
+    if ! firewall-cmd --reload; then
+        errmsg "Failed to reload firewall."
+        return 2
+    fi    
+    stdmsg "Done."
+}
+allowClrMngdDev() { #@ DESCRIPTION: Fix for the log-in error "Authentication is
+                    #@              required to create a color managed device in
+                    #@              XRDP". Please visit below link for more info
+                    #@ USAGE: allowClrMngdDev
+    stdmsg "Creating Polkit rule in below path.." \
+           "/etc/polkit-1/localauthority/50-local.d/allow-colord.pkla"
+    sleep 1
+    cat >/etc/polkit-1/localauthority/50-local.d/allow-colord.pkla <<'EOF'
+[Allow colord for all users]
+Identity=unix-user:*
+Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile 
+ResultAny=yes
+ResualtInactive=auth_admin
+ResultActive=yes
+EOF
+    if [ $? -ne 0 ]; then
+        errmsg "Failed to add rule."
+        return 1
+    fi
+    stdmsg "Done."
+}
+# https://www.seei.biz/authentication-is-required-to-create-a-color-managed-device-in-xrdp/
+# https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html
+enSpanKeybrd() { #@ DESCRIPTION: Enables spanish keyboar support
+                 #@ USAGE: enSpanKeybrd
+    stdmsg "Enabling spanish keyboard support.."
+    sleep 1
+    if ! cp -vf /etc/xrdp/km-0000040a.ini /etc/xrdp/km-0000080a.ini; then
+        errmsg "Failed to enable support."
+        return 1
+    fi
+    if ! cp -vf /etc/xrdp/xrdp_keyboard.ini \
+            /etc/xrdp/xrdp_keyboard.ini_$(date +%F).$$.back; then
+        errmsg "Failed to backup Keyboard ini file."
+        return 2
+    fi
+    if ! sed -i '/rdp_layout_de=0x00000407/i '\
+'rdp_layout_es=0x0000040A\n'\
+'rdp_layout_es2=0x0000080A' /etc/xrdp/xrdp_keyboard.ini; then
+        errmsg "Failed to edit Keyboard ini file."
+        return 3
+    fi
+    if ! sed -i '/rdp_layout_de=de/i '\
+'rdp_layout_es=es\nrdp_layout_es2=es' /etc/xrdp/xrdp_keyboard.ini; then
+        errmsg "Failed to edit Keyboard ini file."
+        return 3
+    fi
+    if ! sed -i '/\[rdp_keyboard_mac\]/i '\
+'[rdp_keyboard_es]\n'\
+'keyboard_type=4\n'\
+'keyboard_subtype=1\n'\
+'model=pc105\n'\
+'rdp_layouts=default_rdp_layouts\n'\
+'layouts_map=default_layouts_map\n' /etc/xrdp/xrdp_keyboard.ini; then
+        errmsg "Failed to edit Keyboard ini file."
+        return 3
+    fi
+    stdmsg "Done."
+}
+setXrdpIni() { #@ DESCRIPTION: Creates Xrdp ini file according to own criterion
+               #@ USAGE: setXrdpIni
+    stdmsg "Backing up Xrdp's current init file.."    
+    sleep 1
+    if ! cp -vf /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini_$(date +%F).$$.back; then
+        stdmsg "Failed to perform backup."
+        return 1
+    fi
+    stdmsg "Done."
+    stdmsg "Writting new Xrdp init file.."
+    sleep 1
+    cat >/etc/xrdp/xrdp.ini <<'EOF'
+[Globals]
+; xrdp.ini file version number
+ini_version=1
+
+; fork a new process for each incoming connection
+fork=true
+; tcp port to listen
+port=3389
+; 'port' above should be connected to with vsock instead of tcp
+use_vsock=false
+; regulate if the listening socket use socket option tcp_nodelay
+; no buffering will be performed in the TCP stack
+tcp_nodelay=true
+; regulate if the listening socket use socket option keepalive
+; if the network con. disappear without close messages, con. will be closed
+tcp_keepalive=true
+#tcp_send_buffer_bytes=32768
+#tcp_recv_buffer_bytes=32768
+
+; security layer can be 'tls', 'rdp' or 'negotiate'
+; for client compatible layer
+security_layer=negotiate
+; minimum security level allowed for client
+; can be 'none', 'low', 'medium', 'high', 'fips'
+crypt_level=high
+; X.509 certificate and private key
+; openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem
+certificate=
+key_file=
+; set SSL protocols
+; can be comma separated list of 'SSLv3', 'TLSv1', 'TLSv1.1', 'TLSv1.2'
+ssl_protocols=TLSv1, TLSv1.1, TLSv1.2
+; set TLS cipher suites
+#tls_ciphers=HIGH
+
+; Section name to use for automatic login if the client sends username
+; and password. If empty, the domain name sent by the client is used.
+; If empty and no domain name is given, the first suitable section in
+; this file will be used.
+autorun=
+
+allow_channels=true
+allow_multimon=true
+bitmap_cache=true
+bitmap_compression=true
+bulk_compression=true
+#hidelogwindow=true
+max_bpp=32
+new_cursors=true
+; fastpath - can be 'input', 'output', 'both', 'none'
+use_fastpath=both
+; when true, userid/password *must* be passed on cmd line
+#require_credentials=true
+; You can set the PAM error text in a gateway setup (MAX 256 chars)
+#pamerrortxt=change your password according to policy at http://url
+
+;
+; colors used by windows in RGB format
+;
+blue=009cb5
+grey=dedede
+#black=000000
+#dark_grey=808080
+#blue=08246b
+#dark_blue=08246b
+#white=ffffff
+#red=ff0000
+#green=00ff00
+#background=626c72
+
+;
+; configure login screen
+;
+
+; Login Screen Window Title
+#ls_title=My Login Title
+
+; top level window background color in RGB format
+ls_top_window_bg_color=009cb5
+
+; width and height of login screen
+ls_width=350
+ls_height=430
+
+; login screen background color in RGB format
+ls_bg_color=dedede
+
+; optional background image filename (bmp format).
+#ls_background_image=
+
+; logo
+; full path to bmp-file or file in shared folder
+ls_logo_filename=
+ls_logo_x_pos=55
+ls_logo_y_pos=50
+
+; for positioning labels such as username, password etc
+ls_label_x_pos=30
+ls_label_width=60
+
+; for positioning text and combo boxes next to above labels
+ls_input_x_pos=110
+ls_input_width=210
+
+; y pos for first label and combo box
+ls_input_y_pos=220
+
+; OK button
+ls_btn_ok_x_pos=142
+ls_btn_ok_y_pos=370
+ls_btn_ok_width=85
+ls_btn_ok_height=30
+
+; Cancel button
+ls_btn_cancel_x_pos=237
+ls_btn_cancel_y_pos=370
+ls_btn_cancel_width=85
+ls_btn_cancel_height=30
+
+[Logging]
+LogFile=xrdp.log
+LogLevel=DEBUG
+EnableSyslog=true
+SyslogLevel=DEBUG
+; LogLevel and SysLogLevel could by any of: core, error, warning, info or debug
+
+[Channels]
+; Channel names not listed here will be blocked by XRDP.
+; You can block any channel by setting its value to false.
+; IMPORTANT! All channels are not supported in all use
+; cases even if you set all values to true.
+; You can override these settings on each session type
+; These settings are only used if allow_channels=true
+rdpdr=true
+rdpsnd=true
+drdynvc=true
+cliprdr=true
+rail=true
+xrdpvr=true
+tcutils=true
+
+; for debugging xrdp, in section xrdp1, change port=-1 to this:
+#port=/tmp/.xrdp/xrdp_display_10
+
+; for debugging xrdp, add following line to section xrdp1
+#chansrvport=/tmp/.xrdp/xrdp_chansrv_socket_7210
+
+
+;
+; Session types
+;
+
+; Some session types such as Xorg, X11rdp and Xvnc start a display server.
+; Startup command-line parameters for the display server are configured
+; in sesman.ini. See and configure also sesman.ini.
+[Xorg]
+name=Xorg
+lib=libxup.so
+username=ask
+password=ask
+ip=127.0.0.1
+port=-1
+xserverbpp=16
+code=20
+
+; You can override the common channel settings for each session type
+#channel.rdpdr=true
+#channel.rdpsnd=true
+#channel.drdynvc=true
+channel.cliprdr=true
+#channel.rail=true
+#channel.xrdpvr=true
+
+EOF
+    if [ $? -ne 0 ]; then
+        stdmsg "Failed to write new init file."
+        return 2
+    fi
+    stdmsg "Done."
+}
+enablexrdp() { #@ DESCRIPTION: Enables Xrdp service and starts it
+               #@ USAGE: enablexrdp
+    stdmsg "Enabling Xrdp service on startup"
+    sleep 1
+    if ! systemctl enable xrdp.service; then
+        errmsg "Failed to enable service."
+        return 2
+    fi
+    stdmsg "Done."
+    stdmsg "Starting Xrdp service.."
+    sleep 1
+    systemctl restart xrdp
+    sleep 3
+    if ! systemctl is-active --quiet xrdp; then
+        errmsg "Failed to start Xrdp."
+        return 3
+    fi
+    stdmsg "Done."
+}
+##
+## -- Main ---------------------------------------------------------------------
+main() {
+    # Check current user (must be root)
+    chkcusr || return $?
+    # Enable epel repo
+    epelon || return $?
+    # Update system
+    SysUpdate || return $?
+    # Install Firewalld firewall service
+    FwdInstall || return $?
+    # Install Gnome Desktop w/Classic Mode startup
+    GNOMEInstall || return $?
+    # Install GIT version control software
+    GITInstall || return $?
+    # Install prereqs for building
+    PrecmpInstall || return $?
+    # Create the downloads directory
+    MKDwlDir || return $?    
+    # Set proxy in environment
+    prxyset
+    # Xrdp local repo dir
+    GitClone _XRDPDIR "$_XRDPURL"  "$_XRDPCMMT" || return $?
+    # Clone Xorgxrdp local repo dir
+    GitClone _XORGXRDPDIR "$_XORGXRDPURL"  "$_XORGXRDPCMMT" || return $?
+    # Build/install Xrdp    
+    mkinstXrdp || return $?
+    # Build/install Xorgxrdp
+    mkinstXorgxrdp || return $?
+    # Set firewall rules
+    setxrdpfw || return $?
+    # Add Polkit authorization manager rule to fix log-in errors
+    allowClrMngdDev || return $?
+    # Enable spanish keyboard support
+    enSpanKeybrd || return $?
+    # Set Ini file
+    setXrdpIni || return $?
+    # Enable Xrdp service
+    enablexrdp || return $?
+}
+##
+## -- Run! ---------------------------------------------------------------------
+main
